@@ -1,19 +1,46 @@
-use std::sync::Arc;
-
-use discourse::{bundle::{Bundle, PostData}, model::post::Post};
+use discourse::{
+    bundle::PostData,
+    model::{PostId, post::Post},
+};
 use once_cell::sync::Lazy;
+use pulsar::{DeserializeMessage, Error as PulsarError, Payload, SerializeMessage};
 use regex::Regex;
 use scraper::{Html, Selector};
-use serde_json::{json, Value};
-use serenity::all::{CreateEmbed, CreateEmbedAuthor};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use serenity::all::{CreateEmbed, CreateEmbedAuthor, CreateEmbedFooter, MessageId};
 
 use crate::{md::html_to_md, utils::trim_to_n_chars};
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DiscordMapping {
+    pub discord_message_id: MessageId,
+    pub post_id: PostId,
+}
 
-pub fn get_post_content(post_data: &PostData) -> Option<String> {
+impl SerializeMessage for DiscordMapping {
+    fn serialize_message(input: Self) -> Result<pulsar::producer::Message, PulsarError> {
+        let payload = serde_json::to_vec(&input).map_err(|e| PulsarError::Custom(e.to_string()))?;
+
+        Ok(pulsar::producer::Message {
+            payload,
+            ..Default::default()
+        })
+    }
+}
+
+impl DeserializeMessage for DiscordMapping {
+    type Output = Result<DiscordMapping, serde_json::Error>;
+
+    fn deserialize_message(payload: &Payload) -> Self::Output {
+        serde_json::from_slice(&payload.data)
+    }
+}
+
+fn get_normal_description(post_data: &PostData) -> String {
     let mut ret = String::new();
     let mut reply = false;
-    if let Some(replying_to) = &post_data._replying_to_post {
+    if let Some(replying_to) = &post_data.replying_to_post {
         reply = true;
         let username = &replying_to.username;
         let html = &replying_to.cooked;
@@ -35,7 +62,69 @@ pub fn get_post_content(post_data: &PostData) -> Option<String> {
     let md = html_to_md(html);
     let md = trim_to_n_chars(&md, if reply { 900 } else { 1900 });
     ret.push_str(&md);
-    Some(ret)
+    ret
+}
+
+fn get_admin_action_description(post_data: &PostData) -> String {
+    match post_data.post.action_code.as_deref() {
+        Some(code) => match code {
+            "public_open" => String::from("Made this topic public"),
+            "open_topic" => String::from("Converted this to a topic"),
+            "private_topic" => String::from("Made this topic a personal message"),
+            "split_topic" => String::from("Split this topic"),
+            "invited_user" => match post_data.post.action_code_who.as_deref() {
+                Some(who) => format!("Invited {}", who),
+                None => String::from("Invited a user"),
+            },
+            "invited_group" => match post_data.post.action_code_who.as_deref() {
+                Some(who) => format!("Invited group {}", who),
+                None => String::from("Invited a group"),
+            },
+            "user_left" => match post_data.post.action_code_who.as_deref() {
+                Some(who) => format!("{} removed themselves from this message", who),
+                None => String::from("A user removed themselves from this message"),
+            },
+            "removed_user" => match post_data.post.action_code_who.as_deref() {
+                Some(who) => format!("Removed {}", who),
+                None => String::from("Removed a user"),
+            },
+            "removed_group" => match post_data.post.action_code_who.as_deref() {
+                Some(who) => format!("Removed {} group", who),
+                None => String::from("Removed a group"),
+            },
+            "autobumped" => String::from("Automatically bumped"),
+            "tags_changed" => String::from("Tags updated"),
+            "category_changed" => String::from("Category updated"),
+            "autoclosed.enabled" | "closed.enabled" => String::from("Closed"),
+            "autoclosed.disabled" | "closed.disabled" => String::from("Opened"),
+            "archived.enabled" => String::from("Archived"),
+            "archived.disabled" => String::from("Unarchived"),
+            "pinned.enabled" => String::from("Pinned"),
+            "pinned.disabled" | "pinned_globally.disabled" => String::from("Unpinned"),
+            "pinned_globally.enabled" => String::from("Pinned globally"),
+            "visible.enabled" => String::from("Listed"),
+            "visible.disabled" => String::from("Unlisted"),
+            "banner.enabled" => String::from(
+                "Made this a banner. It will appear at the top of every page until it is dismissed by the user.",
+            ),
+            "banner.disabled" => String::from(
+                "Removed this banner. It will no longer appear at the top of every page.",
+            ),
+            "forwarded" => String::from("Forwarded the above email"),
+            _ => String::from(""),
+        },
+        None => String::from(""),
+    }
+}
+
+pub fn get_post_content(post_data: &PostData) -> String {
+    match post_data.post.post_type {
+        3 => {
+            let raw = get_admin_action_description(post_data);
+            format!("*{}*", raw)
+        }
+        _ => get_normal_description(post_data),
+    }
 }
 
 pub fn create_embed_author(post: &Post, base_url: &str) -> (String, String) {
@@ -77,13 +166,13 @@ pub fn get_title(post_data: &PostData) -> Option<String> {
 }
 
 pub fn create_embeds(post_data: &PostData) -> Option<Vec<CreateEmbed>> {
-    let base_url = &post_data._burl;
+    let base_url = &post_data.base_url;
     let mut ret: Vec<CreateEmbed> = Vec::new();
     let url = get_link(&post_data, base_url)?;
     let media = get_images(&post_data.post, &url);
 
-    let color = _hex_color_to_int(&post_data._category.color)?;
-    let description = get_post_content(&post_data)?;
+    let color = _hex_color_to_int(&post_data.category.color)?;
+    let description = get_post_content(&post_data);
     let title = get_title(&post_data)?;
     let author_name = &post_data.post.display_username;
     let username = &post_data.post.username;
@@ -117,17 +206,20 @@ pub fn create_embeds_impersonate(post_data: &PostData, base_url: &str) -> Vec<Cr
     let mut ret: Vec<CreateEmbed> = Vec::new();
     if let Some(url) = get_link(&post_data, base_url) {
         let media = get_images(&post_data.post, &url);
-        if let Some(description) = get_post_content(&post_data) {
-            let ordinal = post_data.post.post_number;
-            let mut embed = CreateEmbed::new()
-                .description(description)
-                .url(url)
-                .title(format!("{ordinal}"));
-            if post_data.post.post_type == 2 {
-                embed = embed.color(_hex_color_to_int("#0277BD").unwrap());
-            }
-            ret.push(embed);
+        let description = get_post_content(&post_data);
+        let ordinal = post_data.post.post_number;
+        let footer = CreateEmbedFooter::new(&post_data.post.username);
+        let mut embed = CreateEmbed::new()
+            .description(description)
+            .url(url)
+            .title(format!("{ordinal}"))
+            .footer(footer)
+            .timestamp(post_data.post.updated_at);
+        if post_data.post.post_type == 2 {
+            embed = embed.color(_hex_color_to_int("#0277BD").unwrap());
         }
+        ret.push(embed);
+
         for image in media {
             // println!("found image");
             ret.push(image);

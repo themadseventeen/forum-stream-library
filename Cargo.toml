@@ -21,3 +21,4 @@ chrono = "0.4.42"
 async-trait = "0.1.89"
 anyhow = "1.0.100"
 sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio"] }
+pulsar = "6.5.0"

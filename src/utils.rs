@@ -1,5 +1,13 @@
 use once_cell::sync::Lazy;
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
+
+
+#[derive(Serialize, Deserialize)]
+pub struct InsertDiscordIdRequest {
+    pub discord_message_id: u64,
+    pub post_id: i64,
+}
 
 pub fn trim_to_n_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()

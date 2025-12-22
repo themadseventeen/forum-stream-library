@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 
-use html2md::dummy::DummyHandler;
-use html2md::parse_html_custom;
 use html2md::Handle;
 use html2md::NodeData;
 use html2md::StructuredPrinter;
 use html2md::TagHandler;
+use html2md::dummy::DummyHandler;
+use html2md::parse_html_custom;
 
+use html2md::TagHandlerFactory;
 use html2md::common::get_tag_attr;
 use html2md::walk;
-use html2md::TagHandlerFactory;
 
 use url::Url;
 
@@ -223,9 +223,23 @@ impl TagHandlerFactory for DetailsFactory {
         return Box::new(DetailsHandler::default());
     }
 }
+fn escape_discord_markdown(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '_' | '*' | '`' | '~' | '|' | '>' | '\\' => {
+                escaped.push('\\');
+                escaped.push(c);
+            }
+            _ => escaped.push(c),
+        }
+    }
+    escaped
+}
+
 #[derive(Default)]
 pub struct AsideHandler {
-    username: Option<String>,
+    username_raw: Option<String>,
 }
 impl TagHandler for AsideHandler {
     fn handle(&mut self, tag: &Handle, printer: &mut StructuredPrinter) {
@@ -234,7 +248,7 @@ impl TagHandler for AsideHandler {
         // if let Some(username) = get_tag_attr(tag, "data-username") {
         //     self.username = username;
         // }
-        self.username = get_tag_attr(tag, "data-username");
+        self.username_raw = get_tag_attr(tag, "data-username");
 
         custom.insert(String::from("div"), Box::new(IgnoreFactory));
         custom.insert(String::from("img"), Box::new(CustomImgFactory));
@@ -250,7 +264,8 @@ impl TagHandler for AsideHandler {
     }
 
     fn after_handle(&mut self, printer: &mut StructuredPrinter) {
-        if let Some(username) = &self.username {
+        if let Some(username_raw) = &self.username_raw {
+            let username = escape_discord_markdown(username_raw);
             printer.append_str(&format!("⤷ quoting: {}\n", username));
         }
     }

@@ -127,8 +127,17 @@ pub fn get_post_content(post_data: &PostData) -> String {
     }
 }
 
+fn get_compliant_username(username: &str) -> String {
+    if username.to_lowercase().contains("discord") {
+        "Renamed".to_string()
+    } else {
+        username.to_string()
+    }
+}
+
 pub fn create_embed_author(post: &Post, base_url: &str) -> (String, String) {
-    let name = &post.username;
+    let name = get_compliant_username(&post.username);
+
     let avatar = format!(
         "{}/{}",
         base_url,
